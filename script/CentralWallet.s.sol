@@ -11,7 +11,7 @@ import {ProxyAdmin} from "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.s
 contract CounterScript is Script {
     CentralWallet public centralWallet;
     CentralWalletV2 public centralWalletV2;
- 
+
     ProxyAdmin public proxyAdmin;
     TransparentUpgradeableProxy public proxy;
     Treasury public treasury;
@@ -24,8 +24,7 @@ contract CounterScript is Script {
         centralWallet = new CentralWallet();
         centralWalletV2 = new CentralWalletV2();
         proxy = new TransparentUpgradeableProxy(address(centralWallet), address(proxyAdmin), "");
-        treasury = new Treasury(address(proxy));
-     
+        treasury = new Treasury();
         vm.stopBroadcast();
     }
 }

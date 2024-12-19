@@ -1,209 +1,348 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {TransparentUpgradeableProxy} from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
-import {ProxyAdmin} from "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
-import {Test, console} from "lib/forge-std/src/Test.sol";
+import "forge-std/Test.sol";
+import "forge-std/Vm.sol";
 import "../src/TreasuryContract.sol";
 import "../src/CentralWallet.sol";
+import "forge-std/console.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+
+// Import custom errors from OpenZeppelin contracts
+interface IPausableErrors {
+    error ExpectedPause();
+    error EnforcedPause();
+}
 
 contract TreasuryTest is Test {
     // Contract instances
     Treasury public treasury;
+    Treasury public treasuryImplementation;
     CentralWallet public centralWalletImplementation;
-    ProxyAdmin public proxyAdmin;
-    TransparentUpgradeableProxy public proxy;
+
     // Test accounts
     address public owner;
     address public user1;
     address public user2;
+    address public attacker;
 
-    // Events to test
+    // Constants for testing
+    uint256 constant INITIAL_BALANCE = 100 ether;
+    uint256 constant MAX_WITHDRAWAL = 100 ether;
+
+    // Events
     event CentralWalletInitialized(address centralWalletAddress);
-    event AccessGranted(address user);
-    event AccessRevoked(address user);
+    event AccessGranted(address indexed user);
+    event AccessRevoked(address indexed user);
+    event Deposit(address indexed depositor, uint256 amount);
+    event Withdrawal(address indexed withdrawer, uint256 amount);
 
     function setUp() public {
         // Set up test accounts
-
         owner = address(this);
         user1 = vm.addr(1);
         user2 = vm.addr(2);
-        // Deploy contracts
-        centralWalletImplementation = new CentralWallet();
-         // Deploy ProxyAdmin first
-        proxyAdmin = new ProxyAdmin(owner);
+        attacker = vm.addr(3);
 
-        proxy = new TransparentUpgradeableProxy(
-            address(centralWalletImplementation),
-            address(proxyAdmin),
-            ""
+        // Deploy implementation contracts
+        treasuryImplementation = new Treasury();
+        centralWalletImplementation = new CentralWallet();
+
+        // Deploy proxy for Treasury
+        bytes memory initData = abi.encodeWithSelector(
+            Treasury.initialize.selector,
+            owner
         );
 
-        treasury = new Treasury(address(proxy));
-    }
+        ERC1967Proxy treasuryProxy = new ERC1967Proxy(
+            address(treasuryImplementation),
+            initData
+        );
 
-    // Test Contract Initialization
-    function testInitializeCentralWallet() public {
-        // Expect event to be emitted
-        vm.expectEmit(true, true, true, true);
-        emit CentralWalletInitialized(address(0)); // placeholder address
+        treasury = Treasury(payable(address(treasuryProxy)));
 
-        // Initialize CentralWallet
+        // Initialize CentralWallet through Treasury
         treasury.initializeCentralWallet(address(centralWalletImplementation));
-
-        // Verify initialization
-        assertTrue(treasury.isInitialized(), "Treasury should be initialized");
     }
 
-    // Test Double Initialization Prevention
+    // Initialization Tests
+    function testCorrectInitialization() public view {
+        assertTrue(treasury.owner() == owner, "Owner not set correctly");
+        assertTrue(
+            treasury.centralWallet() != address(0),
+            "Central wallet not initialized"
+        );
+    }
+
     function testCannotInitializeTwice() public {
-        treasury.initializeCentralWallet(address(centralWalletImplementation));
-
-        // Attempt to initialize again should revert
-        vm.expectRevert("CentralWallet already initialized");
+        vm.expectRevert("Already initialized");
         treasury.initializeCentralWallet(address(centralWalletImplementation));
     }
 
-    // Test Access Control
-    function testGrantAndRevokeAccess() public {
+    // Access Control Tests
+    function testAccessControl() public {
         // Grant access
         vm.expectEmit(true, true, true, true);
         emit AccessGranted(user1);
         treasury.grantAccess(user1);
-
-        // Verify access granted
-        assertTrue(treasury.hasAccess(user1), "User should have access");
+        assertTrue(treasury.hasAccess(user1), "Access not granted");
 
         // Revoke access
         vm.expectEmit(true, true, true, true);
         emit AccessRevoked(user1);
         treasury.revokeAccess(user1);
-
-        // Verify access revoked
-        assertFalse(treasury.hasAccess(user1), "User access should be revoked");
+        assertFalse(treasury.hasAccess(user1), "Access not revoked");
     }
 
-    // Test Access Control for Sensitive Functions
     function testOnlyOwnerCanGrantAccess() public {
-        // Switch to a different account
-        vm.prank(user1);
-
-        // Attempt to grant access should revert
-        vm.expectRevert("Not authorized");
+        vm.prank(attacker);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OwnableUpgradeable.OwnableUnauthorizedAccount.selector,
+                attacker
+            )
+        );
         treasury.grantAccess(user2);
     }
 
-    // Test Deposit Functionality
-    function testDeposit() public {
-        // Initialize CentralWallet
-        treasury.initializeCentralWallet(address(centralWalletImplementation));
+    function testCannotGrantAccessToZeroAddress() public {
+        vm.expectRevert("Invalid address");
+        treasury.grantAccess(address(0));
+    }
 
-        // Grant access to user
+    // Deposit Tests
+    function testAuthorizedDeposit() public {
+        uint256 depositAmount = 1 ether;
         treasury.grantAccess(user1);
 
-        // Prepare deposit
-        uint256 depositAmount = 1 ether;
-        vm.prank(user1);
         vm.deal(user1, depositAmount);
+        vm.prank(user1);
 
-        // Perform deposit
+        vm.expectEmit(true, true, true, true);
+        emit Deposit(user1, depositAmount);
         treasury.deposit{value: depositAmount}();
 
-        // Verify balance
-        // Note: This requires checking via proxy call, which is tricky to test directly
+        assertEq(address(treasury.centralWallet()).balance, depositAmount);
     }
-
-    // Test Withdrawal Functionality
-    function testWithdraw() public {
-        // Initialize CentralWallet
-        treasury.initializeCentralWallet(address(centralWalletImplementation));
-
-        // Grant access and deposit
-        treasury.grantAccess(user1);
-
-        uint256 depositAmount = 1 ether;
-        vm.prank(user1);
-        vm.deal(user1, depositAmount);
-        treasury.deposit{value: depositAmount}();
-
-        // Prepare withdrawal
-        uint256 withdrawAmount = 0.5 ether;
-        vm.prank(user1);
-
-        // Perform withdrawal
-        treasury.withdraw(withdrawAmount);
-
-        // Verify balance (would require additional proxy implementation details)
-    }
-
-    // Test Upgrade Functionality
-    function testUpgradeTo() public {
-        // Initialize CentralWallet
-        treasury.initializeCentralWallet(address(centralWalletImplementation));
-
-        // Create a new implementation (mock)
-        CentralWallet newImplementation = new CentralWallet();
-
-        // Upgrade
-        treasury.upgradeTo(address(newImplementation));
-
-        // Additional verification might be needed depending on implementation
-    }
-
-    // Test Unauthorized Deposit
     function testUnauthorizedDeposit() public {
-        // Initialize CentralWallet
-        treasury.initializeCentralWallet(address(centralWalletImplementation));
-
-        // Attempt deposit without access
-        vm.prank(user1);
+        vm.deal(attacker, 1 ether);
+        vm.prank(attacker);
         vm.expectRevert("Not authorized");
         treasury.deposit{value: 1 ether}();
     }
 
-    // Fuzz Testing for Deposit
-    function testFuzzDeposit(uint96 amount) public {
-        // Initialize CentralWallet
-        treasury.initializeCentralWallet(address(centralWalletImplementation));
+    function testZeroValueDeposit() public {
+        treasury.grantAccess(user1);
+        vm.prank(user1);
+        vm.expectRevert("Cannot forward zero value");
+        treasury.deposit{value: 0}();
+    }
 
-        // Grant access to user
+    function testCentralWalletBalanceAfterDeposit() public {
+        uint256 depositAmount = 1 ether;
         treasury.grantAccess(user1);
 
-        // Prepare deposit
+        vm.deal(user1, depositAmount);
         vm.prank(user1);
-        vm.deal(user1, amount);
 
-        // Perform deposit
-        treasury.deposit{value: amount}();
+        treasury.deposit{value: depositAmount}();
 
-        // Note: Full balance verification would require more complex proxy interaction
+        // Verify the balance of the central wallet
+        (bool success, bytes memory returnData) = treasury.centralWallet().call{
+            value: 0
+        }(abi.encodeWithSelector(CentralWallet.getBalance.selector, user1));
+        require(success, "Failed to get balance");
+
+        uint256 balance = abi.decode(returnData, (uint256));
+        assertEq(balance, depositAmount, "Central wallet balance mismatch");
     }
 
-    // Negative Test: Unauthorized Withdrawal
-    function testUnauthorizedWithdrawal() public {
-        // Initialize CentralWallet
-        treasury.initializeCentralWallet(address(centralWalletImplementation));
+    // Withdrawal Tests
+    function testAuthorizedWithdrawal2() public {
+        uint256 depositAmount = 5 ether;
+        uint256 withdrawAmount = 2 ether;
 
-        // Attempt withdrawal without access
+        treasury.grantAccess(user1);
+        treasury.grantAccess(user2);
+        vm.deal(user1, depositAmount);
+        vm.deal(user2, depositAmount);
+
+        // Deposit first
         vm.prank(user1);
-        vm.expectRevert("Not authorized");
-        treasury.withdraw(1 ether);
+        treasury.deposit{value: depositAmount}();
+        // Deposit second
+        vm.prank(user2);
+        treasury.deposit{value: depositAmount}();
+
+        // Check balances
+        (bool success1, bytes memory returnData1) = treasury
+            .centralWallet()
+            .call{value: 0}(
+            abi.encodeWithSelector(CentralWallet.getBalance.selector, user1)
+        );
+        require(success1, "Failed to get balance");
+        uint256 balance1 = abi.decode(returnData1, (uint256));
+
+        (bool success2, bytes memory returnData2) = treasury
+            .centralWallet()
+            .call{value: 0}(
+            abi.encodeWithSelector(CentralWallet.getBalance.selector, user2)
+        );
+        require(success2, "Failed to get balance");
+        uint256 balance2 = abi.decode(returnData2, (uint256));
+
+        console.log(
+            "Central wallet balance:",
+            address(treasury.centralWallet()).balance
+        );
+        console.log("User1 balance from getBalance:", balance1);
+        console.log("User2 balance from getBalance:", balance2);
+
+        // Then withdraw
+        vm.prank(user1);
+        vm.expectEmit(true, true, true, true);
+        emit Withdrawal(user1, withdrawAmount);
+        treasury.withdraw(withdrawAmount);
+
+        assertEq(user1.balance, withdrawAmount);
     }
-
-    // Fallback Receive Test
-    function testFallbackReceive() public {
-        // Initialize CentralWallet
-        treasury.initializeCentralWallet(address(centralWalletImplementation));
-
-        // Send Ether directly to proxy
-        address proxyAddress = treasury.proxyAddress();
-        vm.prank(user1);
+    function testCannotWithdrawMoreThanBalance() public {
+        treasury.grantAccess(user1);
         vm.deal(user1, 1 ether);
 
-        // Send Ether
-        (bool success, ) = proxyAddress.call{value: 1 ether}("");
+        vm.prank(user1);
+        treasury.deposit{value: 1 ether}();
 
-        assertTrue(success, "Fallback should accept Ether");
+        vm.prank(user1);
+        vm.expectRevert("Insufficient balance");
+        treasury.withdraw(2 ether);
+    }
+    function testCannotExceedMaxWithdrawal() public {
+        treasury.grantAccess(user1);
+        vm.deal(user1, MAX_WITHDRAWAL + 1 ether);
+
+        vm.prank(user1);
+        treasury.deposit{value: MAX_WITHDRAWAL + 1 ether}();
+
+        vm.prank(user1);
+        vm.expectRevert("Amount exceeds maximum withdrawal limit");
+        treasury.withdraw(MAX_WITHDRAWAL + 1);
+    }
+    // Pause Tests
+    function testPauseAndUnpause() public {
+        // Pause
+        treasury.pause();
+        assertTrue(treasury.paused(), "Contract should be paused");
+
+        // Try deposit while paused
+        treasury.grantAccess(user1);
+        vm.deal(user1, 1 ether);
+        vm.prank(user1);
+        vm.expectRevert(
+            abi.encodeWithSelector(IPausableErrors.EnforcedPause.selector)
+        );
+        treasury.deposit{value: 1 ether}();
+
+        // Unpause
+        treasury.unpause();
+        assertFalse(treasury.paused(), "Contract should be unpaused");
+
+        // Deposit should work now
+        vm.prank(user1);
+        treasury.deposit{value: 1 ether}();
+    }
+
+    // Upgrade Tests
+    function testUpgrade() public {
+        // Deploy new implementation
+        CentralWallet newImplementation = new CentralWallet();
+
+        // Check initial state
+        uint256 initialBalance = 1 ether;
+        treasury.grantAccess(user1);
+        vm.deal(user1, initialBalance);
+        vm.prank(user1);
+        treasury.deposit{value: initialBalance}();
+
+        // Pause before upgrade
+        treasury.pause();
+
+        // Upgrade
+        treasury.upgradeCentralWallet(address(newImplementation));
+
+        // Verify upgrade
+        assertTrue(treasury.centralWallet() != address(0));
+
+        // Test functionality after upgrade
+        treasury.unpause();
+        vm.deal(user1, initialBalance);
+        vm.prank(user1);
+        treasury.deposit{value: initialBalance}();
+
+        // Verify balance is preserved
+        assertEq(address(treasury.centralWallet()).balance, initialBalance * 2);
+    }
+
+    function testCannotUpgradeWhenNotPaused() public {
+        CentralWallet newImplementation = new CentralWallet();
+        vm.expectRevert(
+            abi.encodeWithSelector(IPausableErrors.ExpectedPause.selector)
+        );
+        treasury.upgradeCentralWallet(address(newImplementation));
+    }
+
+    function testCannotUpgradeToZeroAddress() public {
+        treasury.pause();
+        vm.expectRevert("Invalid implementation");
+        treasury.upgradeCentralWallet(address(0));
+    }
+
+    // Fallback and Receive Tests
+    function testFallbackAndReceive() public {
+        treasury.grantAccess(user1);
+        vm.deal(user1, 1 ether);
+
+        // Test receive function
+        vm.prank(user1);
+        (bool success, ) = address(treasury).call{value: 1 ether}("");
+        assertTrue(success, "Receive function failed");
+
+        // Test fallback function
+        vm.prank(user1);
+        vm.deal(user1, 1 ether);
+        (success, ) = address(treasury).call{value: 1 ether}(hex"12345678");
+        assertTrue(success, "Fallback function failed");
+    }
+
+    // Fuzz Tests
+    function testFuzzDeposit(uint96 amount) public {
+        vm.assume(amount > 0 && amount <= MAX_WITHDRAWAL);
+
+        treasury.grantAccess(user1);
+        vm.deal(user1, amount);
+
+        vm.prank(user1);
+        treasury.deposit{value: amount}();
+
+        assertEq(address(treasury.centralWallet()).balance, amount);
+    }
+
+    function testFuzzWithdrawal(
+        uint96 depositAmount,
+        uint96 withdrawAmount
+    ) public {
+        vm.assume(depositAmount > 0 && depositAmount <= MAX_WITHDRAWAL);
+        vm.assume(withdrawAmount > 0 && withdrawAmount <= depositAmount);
+
+        treasury.grantAccess(user1);
+        vm.deal(user1, depositAmount);
+
+        vm.prank(user1);
+        treasury.deposit{value: depositAmount}();
+
+        vm.prank(user1);
+        treasury.withdraw(withdrawAmount);
+
+        assertEq(user1.balance, withdrawAmount);
     }
 }
