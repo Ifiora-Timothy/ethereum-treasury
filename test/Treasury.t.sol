@@ -33,6 +33,7 @@ interface IOptimizedTreasury {
         address newImplementation,
         bytes memory data
     ) external payable;
+    function getAccessList() external view returns (address[] memory);
 }
 
 contract OptimizedTreasuryTest is Test {
