@@ -17,6 +17,8 @@ via_ir = true
 # Error handling
 extra_output = ["storageLayout", "metadata"]
 
-
+[rpc_endpoints]
+devnet = "${DEVNET_RPC_URL}"
+localnet="${LOCAL_RPC_URL}"
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

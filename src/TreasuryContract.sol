@@ -12,6 +12,8 @@ interface ICentralWallet {
     function initialize(address _treasury) external;
     function deposit() external payable;
     function withdraw(uint256 amount) external;
+    function setAuthorized(address user, bool status) external;
+    function getBalance(address account) external view returns (uint256);
 }
 
 contract Treasury is
@@ -26,11 +28,15 @@ contract Treasury is
     uint256 private constant MAX_WITHDRAWAL = 100 ether;
     // Track the original sender for forwarded calls
     address private _originalSender;
+    // Track authorized addresses
+    address[] public authorizedAddresses;
 
     event CentralWalletInitialized(address centralWalletAddress);
     event CentralWalletUpgraded(address centralWalletAddress);
     event AccessGranted(address indexed user);
     event AccessRevoked(address indexed user);
+    event Withdrawal(address indexed user, uint256 amount);
+    event Deposit(address indexed user, uint256 amount);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -42,8 +48,22 @@ contract Treasury is
         return _originalSender;
     }
 
-    function _setOriginalSender() private {
+    function setAuthorized(address user, bool status) external onlyOwner {
+        hasAccess[user] = status;
+        ICentralWallet(centralWallet).setAuthorized(user, status);
+
+        if (status) {
+            emit AccessGranted(user);
+        } else {
+            emit AccessRevoked(user);
+        }
+    }
+
+    // Add this modifier
+    modifier withOriginalSender() {
         _originalSender = msg.sender;
+        _;
+        delete _originalSender; // Clean up storage
     }
 
     function initialize(address _owner) public initializer {
@@ -57,6 +77,14 @@ contract Treasury is
         address newImplementation
     ) internal view override onlyOwner {
         require(newImplementation != address(0), "Invalid implementation");
+    }
+
+    function getOwner() external view returns (address) {
+        return owner();
+    }
+
+    function getCentralWallet() external view returns (address) {
+        return centralWallet;
     }
 
     function initializeCentralWallet(
@@ -86,17 +114,13 @@ contract Treasury is
         emit CentralWalletInitialized(centralWallet);
     }
 
-    function _forwardToWallet(uint256 amount) internal {
+    function _forwardToWallet(uint256 amount) internal withOriginalSender {
         require(amount > 0, "Cannot forward zero value");
         require(centralWallet != address(0), "Central wallet not initialized");
-
-        _setOriginalSender();
 
         (bool success, bytes memory returnData) = centralWallet.call{
             value: amount
         }(abi.encodeWithSelector(ICentralWallet.deposit.selector));
-
-        delete _originalSender; // Clean up storage
 
         if (!success) {
             if (returnData.length > 0) {
@@ -107,22 +131,8 @@ contract Treasury is
                 revert("Forward to wallet failed");
             }
         }
-    }
 
-    function grantAccess(address _user) external onlyOwner {
-        require(_user != address(0), "Invalid address");
-        require(!hasAccess[_user], "Access already granted");
-
-        hasAccess[_user] = true;
-        emit AccessGranted(_user);
-    }
-
-    function revokeAccess(address _user) external onlyOwner {
-        require(_user != address(0), "Invalid address");
-        require(hasAccess[_user], "Access not granted");
-
-        hasAccess[_user] = false;
-        emit AccessRevoked(_user);
+        emit Deposit(msg.sender, amount);
     }
 
     modifier onlyAuthorized() {
@@ -133,29 +143,55 @@ contract Treasury is
         _;
     }
 
-    function deposit()
-        external
-        payable
-        onlyAuthorized
-        nonReentrant
-        whenNotPaused
-    {
+    // Modified grantAccess function
+    function grantAccess(address _user) external onlyOwner {
+        require(_user != address(0), "Invalid address");
+        require(!hasAccess[_user], "Access already granted");
+
+        hasAccess[_user] = true;
+        authorizedAddresses.push(_user);
+        emit AccessGranted(_user);
+    }
+
+    // Modified revokeAccess function
+    function revokeAccess(address _user) external onlyOwner {
+        require(_user != address(0), "Invalid address");
+        require(hasAccess[_user], "Access not granted");
+
+        hasAccess[_user] = false;
+
+        // Remove from authorizedAddresses array
+        for (uint256 i = 0; i < authorizedAddresses.length; i++) {
+            if (authorizedAddresses[i] == _user) {
+                authorizedAddresses[i] = authorizedAddresses[
+                    authorizedAddresses.length - 1
+                ];
+                authorizedAddresses.pop();
+                break;
+            }
+        }
+
+        emit AccessRevoked(_user);
+    }
+
+    function getAccessList() public view returns (address[] memory) {
+        return authorizedAddresses;
+    }
+    function deposit() external payable nonReentrant whenNotPaused {
         _forwardToWallet(msg.value);
     }
 
     function withdraw(
         uint256 amount
-    ) external onlyAuthorized nonReentrant whenNotPaused {
+    ) external onlyAuthorized nonReentrant whenNotPaused withOriginalSender {
         require(
             amount <= MAX_WITHDRAWAL,
             "Amount exceeds maximum withdrawal limit"
         );
-        _setOriginalSender();
 
         (bool success, bytes memory returnData) = centralWallet.call{value: 0}(
             abi.encodeWithSelector(ICentralWallet.withdraw.selector, amount)
         );
-        delete _originalSender; // Clean up storage
 
         if (!success) {
             if (returnData.length > 0) {
@@ -166,6 +202,8 @@ contract Treasury is
                 revert("Withdrawal failed");
             }
         }
+
+        emit Withdrawal(msg.sender, amount);
     }
 
     function upgradeCentralWallet(
@@ -200,8 +238,15 @@ contract Treasury is
     receive() external payable {
         _forwardToWallet(msg.value);
     }
-
+    // Modified fallback to only forward if there's a value
     fallback() external payable {
-        _forwardToWallet(msg.value);
+        // Only forward if there's actual value sent
+        if (msg.value > 0) {
+            _forwardToWallet(msg.value);
+        }
+        // Otherwise, revert as the function doesn't exist
+        else {
+            revert("Function does not exist");
+        }
     }
 }

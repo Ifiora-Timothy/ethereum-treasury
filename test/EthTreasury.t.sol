@@ -5,8 +5,11 @@ import "forge-std/Test.sol";
 import "forge-std/Vm.sol";
 import "../src/TreasuryContract.sol";
 import "../src/CentralWallet.sol";
+
 import "forge-std/console.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 
 // Import custom errors from OpenZeppelin contracts
 interface IPausableErrors {
@@ -16,9 +19,9 @@ interface IPausableErrors {
 
 contract TreasuryTest is Test {
     // Contract instances
-    Treasury public treasury;
-    Treasury public treasuryImplementation;
-    CentralWallet public centralWalletImplementation;
+    ITreasury public treasury;
+    ITreasury public treasuryImplementation;
+    ICentralWallet public centralWalletImplementation;
 
     // Test accounts
     address public owner;
@@ -45,12 +48,14 @@ contract TreasuryTest is Test {
         attacker = vm.addr(3);
 
         // Deploy implementation contracts
-        treasuryImplementation = new Treasury();
-        centralWalletImplementation = new CentralWallet();
+        treasuryImplementation = ITreasury(address(new Treasury()));
+        centralWalletImplementation = ICentralWallet(
+            address(new CentralWallet())
+        );
 
         // Deploy proxy for Treasury
         bytes memory initData = abi.encodeWithSelector(
-            Treasury.initialize.selector,
+            ITreasury.initialize.selector,
             owner
         );
 
@@ -59,7 +64,7 @@ contract TreasuryTest is Test {
             initData
         );
 
-        treasury = Treasury(payable(address(treasuryProxy)));
+        treasury = ITreasury(payable(address(treasuryProxy)));
 
         // Initialize CentralWallet through Treasury
         treasury.initializeCentralWallet(address(centralWalletImplementation));
@@ -124,12 +129,6 @@ contract TreasuryTest is Test {
 
         assertEq(address(treasury.centralWallet()).balance, depositAmount);
     }
-    function testUnauthorizedDeposit() public {
-        vm.deal(attacker, 1 ether);
-        vm.prank(attacker);
-        vm.expectRevert("Not authorized");
-        treasury.deposit{value: 1 ether}();
-    }
 
     function testZeroValueDeposit() public {
         treasury.grantAccess(user1);
@@ -150,7 +149,7 @@ contract TreasuryTest is Test {
         // Verify the balance of the central wallet
         (bool success, bytes memory returnData) = treasury.centralWallet().call{
             value: 0
-        }(abi.encodeWithSelector(CentralWallet.getBalance.selector, user1));
+        }(abi.encodeWithSelector(ICentralWallet.getBalance.selector, user1));
         require(success, "Failed to get balance");
 
         uint256 balance = abi.decode(returnData, (uint256));
@@ -158,12 +157,10 @@ contract TreasuryTest is Test {
     }
 
     // Withdrawal Tests
-    function testAuthorizedWithdrawal2() public {
+    function testNonAuthorizedWithdrawal() public {
         uint256 depositAmount = 5 ether;
         uint256 withdrawAmount = 2 ether;
 
-        treasury.grantAccess(user1);
-        treasury.grantAccess(user2);
         vm.deal(user1, depositAmount);
         vm.deal(user2, depositAmount);
 
@@ -178,7 +175,7 @@ contract TreasuryTest is Test {
         (bool success1, bytes memory returnData1) = treasury
             .centralWallet()
             .call{value: 0}(
-            abi.encodeWithSelector(CentralWallet.getBalance.selector, user1)
+            abi.encodeWithSelector(ICentralWallet.getBalance.selector, user1)
         );
         require(success1, "Failed to get balance");
         uint256 balance1 = abi.decode(returnData1, (uint256));
@@ -186,7 +183,52 @@ contract TreasuryTest is Test {
         (bool success2, bytes memory returnData2) = treasury
             .centralWallet()
             .call{value: 0}(
-            abi.encodeWithSelector(CentralWallet.getBalance.selector, user2)
+            abi.encodeWithSelector(ICentralWallet.getBalance.selector, user2)
+        );
+        require(success2, "Failed to get balance");
+        uint256 balance2 = abi.decode(returnData2, (uint256));
+
+        console.log(
+            "Central wallet balance:",
+            address(treasury.centralWallet()).balance
+        );
+        console.log("User1 balance from getBalance:", balance1);
+        console.log("User2 balance from getBalance:", balance2);
+
+        // Then withdraw
+        vm.prank(user1);
+        vm.expectRevert("Not authorized");
+        treasury.withdraw(withdrawAmount);
+    }
+
+    function testAuthorizedWithdrawal() public {
+        uint256 depositAmount = 5 ether;
+        uint256 withdrawAmount = 2 ether;
+
+        treasury.grantAccess(user1);
+        vm.deal(user1, depositAmount);
+        vm.deal(user2, depositAmount);
+
+        // Deposit first
+        vm.prank(user1);
+        treasury.deposit{value: depositAmount}();
+        // Deposit second
+        vm.prank(user2);
+        treasury.deposit{value: depositAmount}();
+
+        // Check balances
+        (bool success1, bytes memory returnData1) = treasury
+            .centralWallet()
+            .call{value: 0}(
+            abi.encodeWithSelector(ICentralWallet.getBalance.selector, user1)
+        );
+        require(success1, "Failed to get balance");
+        uint256 balance1 = abi.decode(returnData1, (uint256));
+
+        (bool success2, bytes memory returnData2) = treasury
+            .centralWallet()
+            .call{value: 0}(
+            abi.encodeWithSelector(ICentralWallet.getBalance.selector, user2)
         );
         require(success2, "Failed to get balance");
         uint256 balance2 = abi.decode(returnData2, (uint256));
@@ -206,17 +248,39 @@ contract TreasuryTest is Test {
 
         assertEq(user1.balance, withdrawAmount);
     }
-    function testCannotWithdrawMoreThanBalance() public {
-        treasury.grantAccess(user1);
-        vm.deal(user1, 1 ether);
+    function testDirectWithdrawHack() public {
+        //test bypass treasury to withdraw from central wallet
+        address centralWallet = treasury.centralWallet();
+        uint256 depositAmount = 5 ether;
+        uint256 withdrawAmount = 2 ether;
 
-        vm.prank(user1);
-        treasury.deposit{value: 1 ether}();
+        //dont use treasury try to call the central wallet as it is the proxy address directly
 
+        // Deposit first
+        vm.deal(user1, depositAmount);
+        vm.deal(user2, depositAmount);
+
+        // Deposit normally  first
         vm.prank(user1);
-        vm.expectRevert("Insufficient balance");
-        treasury.withdraw(2 ether);
+        treasury.deposit{value: depositAmount}();
+
+        // Withdraw
+        vm.prank(attacker);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OwnableUpgradeable.OwnableUnauthorizedAccount.selector,
+                attacker
+            )
+        );
+        (bool success, ) = centralWallet.call{value: 0}(
+            abi.encodeWithSelector(
+                ICentralWallet.withdraw.selector,
+                withdrawAmount
+            )
+        );
+        require(success, "Call failed");
     }
+
     function testCannotExceedMaxWithdrawal() public {
         treasury.grantAccess(user1);
         vm.deal(user1, MAX_WITHDRAWAL + 1 ether);
@@ -255,7 +319,9 @@ contract TreasuryTest is Test {
     // Upgrade Tests
     function testUpgrade() public {
         // Deploy new implementation
-        CentralWallet newImplementation = new CentralWallet();
+        ICentralWallet newImplementation = ICentralWallet(
+            address(new CentralWallet())
+        );
 
         // Check initial state
         uint256 initialBalance = 1 ether;
@@ -284,7 +350,10 @@ contract TreasuryTest is Test {
     }
 
     function testCannotUpgradeWhenNotPaused() public {
-        CentralWallet newImplementation = new CentralWallet();
+        ICentralWallet newImplementation = ICentralWallet(
+            address(new CentralWallet())
+        );
+
         vm.expectRevert(
             abi.encodeWithSelector(IPausableErrors.ExpectedPause.selector)
         );

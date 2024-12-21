@@ -6,11 +6,23 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
-
+import "forge-std/console.sol";
 interface ITreasury {
     function getOriginalSender() external view returns (address);
+    function initializeCentralWallet(address centralWallet) external;
+    function grantAccess(address user) external;
+    function revokeAccess(address user) external;
+    function hasAccess(address user) external view returns (bool);
+    function deposit() external payable;
+    function withdraw(uint256 amount) external;
+    function pause() external;
+    function unpause() external;
+    function upgradeCentralWallet(address newImplementation) external;
+    function owner() external view returns (address);
+    function centralWallet() external view returns (address);
+    function initialize(address owner) external;
+    function paused() external view returns (bool);
 }
-
 contract CentralWallet is
     Initializable,
     ReentrancyGuardUpgradeable,
@@ -20,11 +32,14 @@ contract CentralWallet is
 {
     // State variables
     mapping(address => uint256) private balances;
+    mapping(address => bool) private authorized;
     uint256 private totalDeposits;
 
     event Deposit(address indexed depositor, uint256 amount);
     event Withdrawal(address indexed withdrawer, uint256 amount);
     event Initialized(address indexed owner);
+    event AuthorizedUser(address indexed user);
+    event RevokedUser(address indexed user);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -37,6 +52,8 @@ contract CentralWallet is
         __Pausable_init();
         __UUPSUpgradeable_init();
 
+        authorized[_owner] = true;
+
         emit Initialized(_owner);
     }
 
@@ -47,7 +64,6 @@ contract CentralWallet is
     function _authorizeUpgrade(
         address newImplementation
     ) internal view override onlyOwner {
-        // Add custom upgrade logic if needed
         require(newImplementation != address(0), "Invalid implementation");
     }
 
@@ -64,20 +80,19 @@ contract CentralWallet is
         emit Deposit(sender, msg.value);
     }
 
-    function withdraw(uint256 amount) public nonReentrant whenNotPaused {
+    function withdraw(
+        uint256 amount
+    ) public nonReentrant whenNotPaused onlyOwner {
         address sender = _getOriginalSender();
-
+        //check if the withdraw was not called from the treasury contract
         require(amount > 0, "Cannot withdraw 0 ether");
-        require(balances[sender] >= amount, "Insufficient balance");
         require(
             address(this).balance >= amount,
             "Contract has insufficient funds"
         );
 
-        balances[sender] -= amount;
         totalDeposits -= amount;
 
-        // Use low level call with CEI pattern
         (bool success, ) = payable(sender).call{value: amount}("");
         require(success, "Withdrawal failed");
 
@@ -88,7 +103,7 @@ contract CentralWallet is
         return address(this).balance;
     }
 
-    function getBalance(address account) public view returns (uint256) {
+    function getBalance(address account) external view returns (uint256) {
         return balances[account];
     }
 
