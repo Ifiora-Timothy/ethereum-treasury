@@ -6,7 +6,7 @@ import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
-contract OptimizedTreasury is
+contract OptimizedTreasury2 is
     OwnableUpgradeable,
     ReentrancyGuardUpgradeable,
     UUPSUpgradeable,
@@ -53,8 +53,9 @@ contract OptimizedTreasury is
         _;
     }
     function getVersion() external pure returns (uint8) {
-        return 1;
+        return 255;
     }
+
     function deposit() public payable nonReentrant whenNotPaused {
         require(msg.value > 0, "Cannot deposit 0 ether");
 

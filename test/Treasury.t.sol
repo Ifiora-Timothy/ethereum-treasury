@@ -25,6 +25,7 @@ interface IOptimizedTreasury {
     function withdraw(uint256 amount) external;
     function pause() external;
     function unpause() external;
+    function getVersion() external pure returns (uint8);
     function getBalance(address account) external view returns (uint256);
     function getContractBalance() external view returns (uint256);
     function getTotalDeposits() external view returns (uint256);
@@ -251,6 +252,7 @@ contract OptimizedTreasuryTest is Test {
         vm.prank(owner); // Only owner can upgrade
         treasury.upgradeToAndCall(
             address(newImplementation),
+            // 0x5b73C5498c1E3b4dbA84de0F1833c4a029d90519,
             "" // No initialization data needed
         );
 
